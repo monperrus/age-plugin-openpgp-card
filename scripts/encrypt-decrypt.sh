@@ -31,3 +31,16 @@ roundtrip
 # test encryption/decryption with KDF
 oct system kdf-setup --card 0000:00000000
 roundtrip
+
+# a wrong PIN is an error that names the tries left, not a crashed plugin
+age-plugin-openpgp-card > identity.txt
+grep -oh "age1.*" identity.txt > recipients.txt
+echo I like strawberries | rage -R recipients.txt -a > encrypted.age
+if PINENTRY_PROGRAM=/app/scripts/fake-pinentry-wrong.sh rage -d -i identity.txt < encrypted.age > /dev/null 2> wrong-pin.err; then
+  echo "decryption with a wrong PIN succeeded"; exit 1
+fi
+cat wrong-pin.err
+grep -q "tries left: 2" wrong-pin.err
+! grep -qi "panicked" wrong-pin.err
+# the right PIN still works afterwards (the counter is reset)
+roundtrip
