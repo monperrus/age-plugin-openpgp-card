@@ -226,7 +226,14 @@ impl IdentityPluginV1 for IdentityPlugin {
         files: Vec<Vec<Stanza>>,
         mut callbacks: impl Callbacks<identity::Error>,
     ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
+        // Each card is tried in turn for the files that no earlier card could
+        // decrypt: with several identity stubs, a file encrypted to the second
+        // card must not be given up because the first one was found.
+        let mut file_keys = HashMap::with_capacity(files.len());
         'cards: for card_stub in self.cards.iter() {
+            if file_keys.len() == files.len() {
+                break;
+            }
             let ident = card_stub.ident.as_str();
             let mut card = loop {
                 let car = Self::get_card(&card_stub.ident).unwrap();
@@ -266,8 +273,10 @@ impl IdentityPluginV1 for IdentityPlugin {
                 )
                 .unwrap();
             }
-            let mut file_keys = HashMap::with_capacity(files.len());
             for (file_index, stanzas) in files.iter().enumerate() {
+                if file_keys.contains_key(&file_index) {
+                    continue;
+                }
                 for (stanza_index, stanza) in stanzas.iter().enumerate() {
                     if let Ok(Some(file_key)) =
                         Self::unwrap_stanza(&mut tx, ident, &pk, stanza, &mut callbacks).map_err(
@@ -287,9 +296,8 @@ impl IdentityPluginV1 for IdentityPlugin {
 
             drop(tx);
             Self::clear_user_pin(card);
-            return Ok(file_keys);
         }
-        Ok(Default::default())
+        Ok(file_keys)
     }
 }
 
