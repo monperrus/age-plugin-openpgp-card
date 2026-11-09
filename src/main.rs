@@ -280,6 +280,8 @@ impl IdentityPluginV1 for IdentityPlugin {
                 ))?
                 .unwrap();
             if let Err(e) = tx.verify_user_pin(pin) {
+                // the cached card data still holds the counter from before the attempt
+                let _ = tx.invalidate_cache();
                 let left = tx
                     .pw_status_bytes()
                     .map(|status| status.err_count_pw1().to_string())
