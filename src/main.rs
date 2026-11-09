@@ -29,6 +29,7 @@ use openpgp_card::{
 };
 use subtle::ConstantTimeEq;
 use x25519_dalek::PublicKey;
+use zeroize::Zeroizing;
 
 // Use lower-case HRP to avoid https://github.com/rust-bitcoin/rust-bech32/issues/40
 const IDENTITY_PREFIX: Hrp = Hrp::parse_unchecked("age-plugin-openpgp-card-");
@@ -150,7 +151,9 @@ impl IdentityPlugin {
             }
         };
 
-        let shared_secret = tx.card().decipher(Cryptogram::ECDH(&ephemeral_share))?;
+        // The ECDH result and the key derived from it unlock this file: wipe them
+        // from memory when they go out of scope.
+        let shared_secret = Zeroizing::new(tx.card().decipher(Cryptogram::ECDH(&ephemeral_share))?);
         if shared_secret
             .iter()
             .fold(0, |acc, b| acc | b)
@@ -164,7 +167,7 @@ impl IdentityPlugin {
         salt[..32].copy_from_slice(epk.as_bytes());
         salt[32..].copy_from_slice(pk);
 
-        let enc_key = hkdf(&salt, X25519_RECIPIENT_KEY_LABEL, &shared_secret);
+        let enc_key = Zeroizing::new(hkdf(&salt, X25519_RECIPIENT_KEY_LABEL, &shared_secret));
 
         // A failure to decrypt is non-fatal (we try to decrypt the recipient
         // stanza with other X25519 keys), because we cannot tell which key
