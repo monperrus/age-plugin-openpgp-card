@@ -210,10 +210,33 @@ impl IdentityPluginV1 for IdentityPlugin {
         files: Vec<Vec<Stanza>>,
         mut callbacks: impl Callbacks<identity::Error>,
     ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
-        'cards: for card_stub in self.cards.iter() {
+        // A card that cannot be used is reported to the age client as an error on
+        // this identity, instead of panicking (which the client only sees as a
+        // crashed plugin).
+        let card_error = |index: usize, ident: &str, what: &str| {
+            let message = format!("card {ident}: {what}");
+            files
+                .iter()
+                .enumerate()
+                .map(|(file_index, _)| {
+                    (
+                        file_index,
+                        Err(vec![identity::Error::Identity {
+                            index,
+                            message: message.clone(),
+                        }]),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        };
+
+        'cards: for (card_index, card_stub) in self.cards.iter().enumerate() {
             let ident = card_stub.ident.as_str();
             let mut card = loop {
-                let car = Self::get_card(&card_stub.ident).unwrap();
+                let car = match Self::get_card(&card_stub.ident) {
+                    Ok(car) => car,
+                    Err(e) => return Ok(card_error(card_index, ident, &e.to_string())),
+                };
                 if let Some(card) = car {
                     break card;
                 } else {
@@ -226,21 +249,47 @@ impl IdentityPluginV1 for IdentityPlugin {
                 }
             };
 
-            let mut tx = card.transaction().unwrap();
-            let pk: Vec<u8> =
-                if let PublicKeyMaterial::E(ecc) = tx.public_key_material(Decryption).unwrap() {
-                    ecc.data().into()
-                } else {
-                    //return Err(DecryptError::NonEccCard.into());
-                    continue 'cards;
-                };
+            let mut tx = match card.transaction() {
+                Ok(tx) => tx,
+                Err(e) => return Ok(card_error(card_index, ident, &e.to_string())),
+            };
+            let pk: Vec<u8> = match tx.public_key_material(Decryption) {
+                Ok(PublicKeyMaterial::E(ecc)) => ecc.data().into(),
+                //return Err(DecryptError::NonEccCard.into());
+                Ok(_) => continue 'cards,
+                Err(e) => return Ok(card_error(card_index, ident, &e.to_string())),
+            };
 
-            tx.verify_user_pin(
-                callbacks
-                    .request_secret(&format!("Unlock card {}", ident))?
-                    .unwrap(),
-            )
-            .unwrap();
+            // Each wrong PIN costs one of the card's tries: show how many are left,
+            // and do not offer a PIN prompt on a blocked card.
+            let tries = match tx.pw_status_bytes() {
+                Ok(status) => status.err_count_pw1(),
+                Err(e) => return Ok(card_error(card_index, ident, &e.to_string())),
+            };
+            if tries == 0 {
+                return Ok(card_error(
+                    card_index,
+                    ident,
+                    "the user PIN is blocked; unblock it with the admin PIN or the resetting code",
+                ));
+            }
+            let pin = callbacks
+                .request_secret(&format!(
+                    "Unlock card {ident} ({tries} PIN {} left)",
+                    if tries == 1 { "try" } else { "tries" }
+                ))?
+                .unwrap();
+            if let Err(e) = tx.verify_user_pin(pin) {
+                let left = tx
+                    .pw_status_bytes()
+                    .map(|status| status.err_count_pw1().to_string())
+                    .unwrap_or_else(|_| "unknown".into());
+                return Ok(card_error(
+                    card_index,
+                    ident,
+                    &format!("PIN verification failed ({e}); tries left: {left}"),
+                ));
+            }
             let mut file_keys = HashMap::with_capacity(files.len());
             for (file_index, stanzas) in files.iter().enumerate() {
                 for (stanza_index, stanza) in stanzas.iter().enumerate() {
