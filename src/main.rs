@@ -114,6 +114,19 @@ impl IdentityPlugin {
         Ok(None)
     }
 
+    /// Reset the card's "user PIN verified" state (OpenPGP card 3.4, VERIFY
+    /// with P1=FF). Without it the card stays unlocked after the decryption,
+    /// until it is reset or unplugged, and any process that can reach it may
+    /// use the decryption key without the PIN. Best effort: older cards that do
+    /// not know this command keep the previous behaviour.
+    fn clear_user_pin(card: Card<Open>) {
+        let mut backend = card.into_backend();
+        let tx = backend.transaction(None);
+        if let Ok(mut tx) = tx {
+            let _ = tx.transmit(&[0x00, 0x20, 0xff, 0x82], 2);
+        }
+    }
+
     fn unwrap_stanza<'a>(
         tx: &mut Card<Transaction<'a>>,
         ident: &str,
@@ -272,6 +285,8 @@ impl IdentityPluginV1 for IdentityPlugin {
                 }
             }
 
+            drop(tx);
+            Self::clear_user_pin(card);
             return Ok(file_keys);
         }
         Ok(Default::default())
