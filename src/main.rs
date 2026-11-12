@@ -104,9 +104,17 @@ enum DecryptError {
 impl IdentityPlugin {
     fn get_card(ident: &str) -> Result<Option<Card<Open>>, Box<dyn std::error::Error>> {
         for backend in PcscBackend::cards(None)? {
-            let mut card = Card::new(backend?)?;
-            let tx = card.transaction()?;
-            if ident == tx.application_identifier()?.ident() {
+            // an unreadable card is not the one asked for: skip it
+            let Ok(mut card) = backend.map_err(Into::into).and_then(Card::new) else {
+                continue;
+            };
+            let Ok(tx) = card.transaction() else {
+                continue;
+            };
+            if tx
+                .application_identifier()
+                .is_ok_and(|aid| aid.ident() == ident)
+            {
                 drop(tx);
                 return Ok(Some(card));
             }
@@ -386,11 +394,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?);
     }
 
+    // A card that cannot be read, or has no decryption key (e.g. a YubiKey
+    // whose OpenPGP app is unused), is skipped: it must not hide the others.
     for backend in PcscBackend::cards(None)? {
-        let mut card = Card::new(backend?)?;
+        let mut card = match backend.map_err(Into::into).and_then(Card::new) {
+            Ok(card) => card,
+            Err(e) => {
+                eprintln!("age-plugin-openpgp-card: skipping a card: {e}");
+                continue;
+            }
+        };
         let mut tx = card.transaction()?;
-        if let PublicKeyMaterial::E(ecc) = tx.public_key_material(Decryption)? {
-            let ident = tx.application_identifier()?.ident();
+        let ident = tx.application_identifier()?.ident();
+        let pk = match tx.public_key_material(Decryption) {
+            Ok(pk) => pk,
+            Err(e) => {
+                eprintln!(
+                    "age-plugin-openpgp-card: card {ident}: no decryption key ({e}), skipped"
+                );
+                continue;
+            }
+        };
+        if let PublicKeyMaterial::E(ecc) = pk {
             println!("# Card ident {}", ident);
             println!(
                 "# {}",
